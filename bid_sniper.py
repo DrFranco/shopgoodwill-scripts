@@ -266,14 +266,105 @@ class BidSniper:
 
         # Check if we still want to alert on this item
         favorite = self.favorites_cache["favorites"].get(item_id, None)
-        if favorite:
-            delta_until_end = get_timedelta_to_time(end_time)
-            delta_until_end = end_time.replace(microsecond=0) - datetime.datetime.now(
-                datetime.timezone.utc
-            ).replace(microsecond=0)
-            self.logger.warning(
-                f"Time alert - {favorite['title']} ending in {delta_until_end}"
+        if not favorite:
+            return None
+
+        # compute remaining time without microseconds for nicer output
+        delta_until_end = end_time.replace(microsecond=0) - datetime.datetime.now(
+            datetime.timezone.utc
+        ).replace(microsecond=0)
+
+        # Try to enrich alert with current price, number of bids, and a link
+        current_price = None
+        current_price_val = None
+        num_bids = None
+        item_link = None
+
+        try:
+            item_info = self.shopgoodwill_client.get_item_info(item_id)
+
+            # bid history is often present under bidHistory.bidSummary
+            bid_summary = item_info.get("bidHistory", {}).get("bidSummary", list())
+            if bid_summary:
+                # latest bid expected at index 0
+                latest = bid_summary[0]
+                amt = latest.get("amount") or latest.get("bidAmount") or latest.get("price")
+                if isinstance(amt, (int, float)):
+                    current_price_val = float(amt)
+                    current_price = f"${current_price_val:.2f}"
+                elif isinstance(amt, str) and amt:
+                    # try to coerce strings like "$12.34" or "12.34"
+                    try:
+                        current_price_val = float(amt.replace("$", "").replace(",", ""))
+                        current_price = f"${current_price_val:.2f}"
+                    except Exception:
+                        current_price = amt
+
+                num_bids = len(bid_summary)
+
+            # fallback price fields from item_info
+            if current_price is None:
+                price_field = (
+                    item_info.get("currentPrice")
+                    or item_info.get("price")
+                    or item_info.get("salePrice")
+                    or item_info.get("startingBid")
+                )
+                if isinstance(price_field, (int, float)):
+                    current_price_val = float(price_field)
+                    current_price = f"${current_price_val:.2f}"
+                elif isinstance(price_field, str) and price_field:
+                    try:
+                        current_price_val = float(price_field.replace("$", "").replace(",", ""))
+                        current_price = f"${current_price_val:.2f}"
+                    except Exception:
+                        current_price = price_field
+
+            # possible URL fields, otherwise construct a friendly fallback
+            item_link = (
+                item_info.get("itemUrl")
+                or item_info.get("auctionUrl")
+                or item_info.get("url")
+                or favorite.get("url")
+                or f"https://shopgoodwill.com/item/{item_id}"
             )
+
+        except BaseException as exc:
+            # If we can't fetch item info, continue with what we have
+            self.logger.debug(
+                f"Failed to fetch item info for {item_id}: {type(exc).__name__} - {exc}"
+            )
+
+        # try to include configured max_bid (from favorite notes) in the alert
+        max_bid_cfg = None
+        notes = favorite.get("notes")
+        if notes:
+            try:
+                notes_js = json.loads(notes)
+                mb = notes_js.get("max_bid")
+                if mb is not None:
+                    try:
+                        max_bid_cfg = float(mb)
+                    except Exception:
+                        # leave as-is if can't parse
+                        max_bid_cfg = None
+            except JSONDecodeError:
+                pass
+
+        parts = [f"Time alert - {favorite['title']} ending in {delta_until_end}"]
+        if current_price:
+            parts.append(f"price: {current_price}")
+        if max_bid_cfg is not None:
+            parts.append(f"max_bid: ${max_bid_cfg:.2f}")
+        if num_bids is not None:
+            parts.append(f"bids: {num_bids}")
+        if item_link:
+            parts.append(f"link: {item_link}")
+
+        if current_price_val is not None and max_bid_cfg is not None and current_price_val > max_bid_cfg:
+            self.logger.warning(" | ".join(parts))
+        else:
+            self.logger.info(" | ".join(parts))
 
         return None
 
@@ -320,6 +411,50 @@ class BidSniper:
             max_bid = float(max_bid)
         except ValueError:
             self.logger.error(f"ValueError casting max_bid value '{max_bid}' as float")
+            return None
+
+        # Attempt to fetch the current price so we can skip bidding if it's already
+        # greater than or equal to the configured max_bid.
+        current_price_val = None
+        item_info = None
+        try:
+            item_info = self.shopgoodwill_client.get_item_info(item_id)
+
+            bid_summary = item_info.get("bidHistory", {}).get("bidSummary", list())
+            if bid_summary:
+                latest = bid_summary[0]
+                amt = latest.get("amount") or latest.get("bidAmount") or latest.get("price")
+                if isinstance(amt, (int, float)):
+                    current_price_val = float(amt)
+                elif isinstance(amt, str) and amt:
+                    try:
+                        current_price_val = float(amt.replace("$", "").replace(",", ""))
+                    except Exception:
+                        current_price_val = None
+
+            if current_price_val is None:
+                price_field = (
+                    item_info.get("currentPrice")
+                    or item_info.get("price")
+                    or item_info.get("salePrice")
+                    or item_info.get("startingBid")
+                )
+                if isinstance(price_field, (int, float)):
+                    current_price_val = float(price_field)
+                elif isinstance(price_field, str) and price_field:
+                    try:
+                        current_price_val = float(price_field.replace("$", "").replace(",", ""))
+                    except Exception:
+                        current_price_val = None
+
+        except BaseException:
+            # If we can't fetch current price, continue and allow bidding (no decision)
+            current_price_val = None
+
+        if current_price_val is not None and current_price_val >= max_bid:
+            self.logger.info(
+                f"Skipping bid on '{favorite['title']}' because current price ${current_price_val:.2f} >= max_bid ${max_bid:.2f}"
+            )
             return None
 
         # if we want to use the friend_list feature,
