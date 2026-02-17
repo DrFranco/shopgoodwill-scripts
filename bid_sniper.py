@@ -414,14 +414,17 @@ class BidSniper:
             return None
 
         # Attempt to fetch the current price so we can skip bidding if it's already
-        # greater than or equal to the configured max_bid.
+        # greater than the configured max_bid. Note: if there are no existing bids,
+        # we allow placing a bid when current price == max_bid.
         current_price_val = None
+        num_bids = 0
         item_info = None
         try:
             item_info = self.shopgoodwill_client.get_item_info(item_id)
 
             bid_summary = item_info.get("bidHistory", {}).get("bidSummary", list())
             if bid_summary:
+                num_bids = len(bid_summary)
                 latest = bid_summary[0]
                 amt = latest.get("amount") or latest.get("bidAmount") or latest.get("price")
                 if isinstance(amt, (int, float)):
@@ -451,11 +454,20 @@ class BidSniper:
             # If we can't fetch current price, continue and allow bidding (no decision)
             current_price_val = None
 
-        if current_price_val is not None and current_price_val >= max_bid:
-            self.logger.info(
-                f"Skipping bid on '{favorite['title']}' because current price ${current_price_val:.2f} >= max_bid ${max_bid:.2f}"
-            )
-            return None
+        if current_price_val is not None:
+            # If current price is greater than max_bid, skip.
+            if current_price_val > max_bid:
+                self.logger.info(
+                    f"Skipping bid on '{favorite['title']}' because current price ${current_price_val:.2f} > max_bid ${max_bid:.2f}"
+                )
+                return None
+            # If current price equals max_bid, only skip if there are existing bids.
+            elif current_price_val == max_bid:
+                if num_bids and num_bids > 0:
+                    self.logger.info(
+                        f"Skipping bid on '{favorite['title']}' because current price ${current_price_val:.2f} == max_bid ${max_bid:.2f} and there are existing bids"
+                    )
+                    return None
 
         # if we want to use the friend_list feature,
         # we must get the highest bidder before placing a bid

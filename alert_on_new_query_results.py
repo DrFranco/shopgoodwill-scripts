@@ -306,8 +306,14 @@ def main():
     # init seen listings
     seen_listings_filename = config.get("seen_listings_filename", "seen_listings.json")
     if os.path.isfile(seen_listings_filename):
-        with open(seen_listings_filename, "r") as f:
-            seen_listings = json.load(f)
+        try:
+            with open(seen_listings_filename, "r") as f:
+                seen_listings = json.load(f)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Invalid seen_listings JSON detected - clearing existing seen_listings"
+            )
+            seen_listings = dict()
 
         # if the user has an old seen_listings file,
         # delete all entries (and let them know about it)
@@ -320,9 +326,24 @@ def main():
     else:
         seen_listings = dict()
 
-    if not args.all and args.query_name not in saved_queries:
-        logger.error(f'Invalid query_name "{args.query_name}" - exiting')
-        exit(1)
+    if not args.all:
+        if args.query_name is None:
+            query_names = sorted(saved_queries.keys())
+            if len(query_names) == 1:
+                args.query_name = query_names[0]
+                logger.info(
+                    f'No query_name provided - defaulting to only configured query "{args.query_name}"'
+                )
+            else:
+                logger.error(
+                    "No query_name provided. Use -q/--query-name, --all, or --list-queries"
+                )
+                logger.error(list_query_string)
+                exit(1)
+        elif args.query_name not in saved_queries:
+            logger.error(f'Invalid query_name "{args.query_name}" - exiting')
+            logger.error(list_query_string)
+            exit(1)
 
     if args.all:
         queries_to_run = saved_queries
